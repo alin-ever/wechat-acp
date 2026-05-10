@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4
+
+- Update `claude` preset to use `@agentclientprotocol/claude-agent-acp` (the deprecated `@zed-industries/claude-code-acp` was renamed)
+
 ## 0.1.3
 
 - Forward agent thinking to WeChat by default; use `--hide-thoughts` to opt out (replaces `--show-thoughts`)
