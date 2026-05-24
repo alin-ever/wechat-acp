@@ -1,6 +1,6 @@
 {
   "name": "wechat-acp",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Bridge WeChat to any ACP-compatible AI agent",
   "type": "module",
   "files": [
@@ -27,7 +27,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.16.1",
-    "applicationinsights": "^3.0.0",
+    "applicationinsights": "^2.9.6",
     "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {

@@ -52,11 +52,7 @@ interface AppInsightsClient {
 
 let client: AppInsightsClient | null = null;
 let installId = "";
-let appVersion = "";
 let disabled = false;
-// v3 of the SDK ignores `client.commonProperties`, so we merge these into each
-// event's `properties` ourselves.
-let baseProperties: Record<string, string> = {};
 
 function isDisabledByEnv(): boolean {
   const v = (process.env.WECHAT_ACP_TELEMETRY ?? "").trim().toLowerCase();
@@ -97,7 +93,6 @@ export function initTelemetry(opts: {
 
   try {
     installId = loadOrCreateInstallId(opts.storageDir);
-    appVersion = opts.version;
 
     // Lazy-load the SDK so disabled installs don't pay any cost.
     // Cast through `unknown` so the type stays opaque even if the package
@@ -128,11 +123,13 @@ export function initTelemetry(opts: {
       .start();
 
     const c = appInsights.defaultClient as unknown as AppInsightsClient;
-    // `cloudRole` is the one legacy tag the v3 SDK still propagates (via OTel
-    // resource attributes). `ai.user.id` / `ai.session.id` are NOT — we set
-    // those per-event with `tagOverrides` below.
+    // Static envelope tags. These attach to every outgoing event automatically
+    // — no need to repeat them per-event.
     c.context.tags[c.context.keys.cloudRole] = "wechat-acp";
-    baseProperties = {
+    c.context.tags[c.context.keys.userId] = installId;
+    c.context.tags["ai.application.ver"] = opts.version;
+    // commonProperties is auto-merged into every event's customDimensions.
+    c.commonProperties = {
       version: opts.version,
       node: process.version,
       os: process.platform,
@@ -141,8 +138,6 @@ export function initTelemetry(opts: {
       ...(opts.agentPreset ? { agentPreset: opts.agentPreset } : {}),
       ...(opts.daemon !== undefined ? { daemon: String(opts.daemon) } : {}),
     };
-    // Best-effort: also set commonProperties for SDK versions that honor it.
-    c.commonProperties = { ...baseProperties };
     client = c;
   } catch {
     // Telemetry must never break the app.
@@ -152,21 +147,15 @@ export function initTelemetry(opts: {
 }
 
 /**
- * Build the tagOverrides that pin `user_Id` and `session_Id` on the App
- * Insights envelope. v3 of the SDK does not honor `context.tags` for these
- * fields, so we set them per-event.
+ * Build per-event tagOverrides. Only the session id varies per call; cloud
+ * role, user id, and application version are pinned once on `context.tags`
+ * at init time.
  */
 function buildTagOverrides(sessionId?: string): Record<string, string> {
-  return {
-    "ai.user.id": installId,
-    // Fall back to installId so app-lifecycle events (no per-user context) still
-    // have a stable, non-null session id rather than collapsing into one global
-    // bucket across all installs.
-    "ai.session.id": sessionId && sessionId.length > 0 ? sessionId : installId,
-    // Populates the built-in `application_Version` column so the dashboard's
-    // version filter works without relying on customDimensions.
-    ...(appVersion ? { "ai.application.ver": appVersion } : {}),
-  };
+  // Fall back to installId so app-lifecycle events (no per-user context) still
+  // have a stable, non-null session id rather than collapsing into one global
+  // bucket across all installs.
+  return { "ai.session.id": sessionId && sessionId.length > 0 ? sessionId : installId };
 }
 
 export function trackEvent(
@@ -176,7 +165,7 @@ export function trackEvent(
 ): void {
   if (disabled || !client) return;
   try {
-    const properties: Record<string, string> = { ...baseProperties };
+    const properties: Record<string, string> = {};
     if (props) {
       for (const [k, v] of Object.entries(props)) {
         properties[k] = typeof v === "string" ? v : String(v);
@@ -194,7 +183,7 @@ export function trackException(err: unknown, area: string, sessionId?: string): 
     const exception = err instanceof Error ? err : new Error(String(err));
     client.trackException({
       exception,
-      properties: { ...baseProperties, area },
+      properties: { area },
       tagOverrides: buildTagOverrides(sessionId),
     });
   } catch {
