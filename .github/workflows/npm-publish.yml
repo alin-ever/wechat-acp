@@ -64,6 +64,7 @@ jobs:
             exit 1
           fi
       - run: npm ci
+      - run: npm test
       - run: npm publish --provenance --access public
 
   publish-next:
@@ -118,6 +119,8 @@ jobs:
       - run: npm ci
         if: steps.check.outputs.already != 'true'
       - run: npm run build
+        if: steps.check.outputs.already != 'true'
+      - run: npm test
         if: steps.check.outputs.already != 'true'
       - name: Set prerelease version in package.json (no commit)
         if: steps.check.outputs.already != 'true'
