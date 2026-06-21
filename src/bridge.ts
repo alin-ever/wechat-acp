@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { login, loadToken, type TokenData } from "./weixin/auth.js";
 import { startMonitor } from "./weixin/monitor.js";
-import { sendTextMessage, sendFileMessage } from "./weixin/send.js";
+import { sendTextMessage, sendFileMessage, splitText } from "./weixin/send.js";
 import { sendTyping, getConfig } from "./weixin/api.js";
 import { TypingStatus, MessageType } from "./weixin/types.js";
 import type { WeixinMessage } from "./weixin/types.js";
@@ -29,8 +29,7 @@ const ACP_CONFIG_COMMAND = BRIDGE_COMMANDS.acpConfig;
 const ACP_CANCEL_COMMAND = BRIDGE_COMMANDS.acpCancel;
 const BUFFER_START_COMMAND = BRIDGE_COMMANDS.promptStart;
 const BUFFER_DONE_COMMAND = BRIDGE_COMMANDS.promptDone;
-const TEXT_BYTE_LIMIT = 2048;
-const FILE_MIME = "text/markdown";
+const TEXT_CHUNK_LIMIT = 2048;
 const BUFFER_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const BUFFER_MAX_BLOCKS = 50;
 const SEGMENT_SEND_MAX_ATTEMPTS = 3;
@@ -598,6 +597,17 @@ export class WeChatAcpBridge {
   }
 
   private async sendReply(userId: string, contextToken: string, text: string): Promise<void> {
+    const sendfileMatch = text.match(/^@sendfile\s+(.+)/);
+    if (sendfileMatch) {
+      const filePath = sendfileMatch[1]!.trim();
+      const previous = this.sendChains.get(userId) ?? Promise.resolve();
+      const current = previous
+        .catch(() => {})
+        .then(() => this.sendOriginalFile(userId, contextToken, filePath));
+      this.sendChains.set(userId, current.catch(() => {}));
+      return current;
+    }
+
     // Serialize all replies to the same user behind a per-user promise chain so
     // that segments from separate sendReply calls cannot interleave (issue #38).
     // The stored link swallows errors so one failed reply doesn't break the
@@ -613,45 +623,123 @@ export class WeChatAcpBridge {
     return current;
   }
 
+  private async sendOriginalFile(
+    userId: string,
+    contextToken: string,
+    filePath: string,
+  ): Promise<void> {
+    const fileName = path.basename(filePath);
+    this.log(`[sendfile] sending: ${filePath}`);
+
+    if (!fs.existsSync(filePath)) {
+      this.log(`[sendfile] file not found: ${filePath}`);
+      await this.paceConsecutiveSend(userId);
+      await sendTextMessage(userId, `文件不存在: ${filePath}`, {
+        baseUrl: this.tokenData!.baseUrl,
+        token: this.tokenData!.token,
+        contextToken,
+      }).catch(() => {});
+      return;
+    }
+
+    try {
+      const buffer = fs.readFileSync(filePath);
+      this.log(`[sendfile] ${fileName} (${buffer.length}B)`);
+
+      await this.paceConsecutiveSend(userId);
+      await sendFileMessage(
+        userId,
+        buffer,
+        fileName,
+        {
+          baseUrl: this.tokenData!.baseUrl,
+          token: this.tokenData!.token,
+          contextToken,
+          cdnBaseUrl: this.config.wechat.cdnBaseUrl,
+        },
+      );
+      this.log(`[sendfile] sent`);
+    } catch (err) {
+      this.log(`[sendfile] failed: ${String(err)}`);
+      trackException(err, "reply.sendfile", hashUserId(userId));
+    }
+  }
+
   private async deliverReply(userId: string, contextToken: string, text: string): Promise<void> {
     const startedAt = Date.now();
     const textBytes = Buffer.byteLength(text, "utf-8");
-    let sent = false;
+    this.log(`[reply] ${textBytes} bytes, limit ${TEXT_CHUNK_LIMIT}`);
+    let segmentsSent = 0;
+    let anyFailed = false;
 
-    if (textBytes <= TEXT_BYTE_LIMIT) {
-      const clientId = `wechat-acp-${crypto.randomUUID()}`;
+    if (textBytes > TEXT_CHUNK_LIMIT * 3) {
+      const fileSent = await this.deliverFileReply(userId, contextToken, text);
+      if (fileSent) {
+        trackEvent("reply.sent", {
+          userIdHash: hashUserId(userId),
+          sentAsFile: true,
+          bytes: textBytes,
+          durationMs: Date.now() - startedAt,
+        }, hashUserId(userId));
+        this.cancelTypingIndicator(userId, contextToken).catch(() => {});
+        return;
+      }
+      this.log(`[reply] file send failed, falling back to text segments`);
+    }
+
+    const segments = splitText(text, TEXT_CHUNK_LIMIT);
+
+    for (const segment of segments) {
+      const segmentClientId = `wechat-acp-${crypto.randomUUID()}`;
+      let sent = false;
+
       for (let attempt = 1; attempt <= SEGMENT_SEND_MAX_ATTEMPTS; attempt++) {
         try {
           await this.paceConsecutiveSend(userId);
           await sendTextMessage(
             userId,
-            text,
+            segment,
             {
               baseUrl: this.tokenData!.baseUrl,
               token: this.tokenData!.token,
               contextToken,
             },
-            clientId,
+            segmentClientId,
           );
           sent = true;
           break;
         } catch (err) {
-          trackException(err, "reply", hashUserId(userId));
+          trackException(err, "reply.segment", hashUserId(userId));
           if (attempt < SEGMENT_SEND_MAX_ATTEMPTS) {
             await new Promise((r) => setTimeout(r, SEGMENT_SEND_RETRY_BASE_MS * attempt));
           }
         }
       }
-    } else {
-      sent = await this.deliverFileReply(userId, contextToken, text, startedAt);
+
+      if (sent) {
+        segmentsSent++;
+      } else {
+        anyFailed = true;
+      }
+    }
+
+    if (anyFailed) {
+      trackException(
+        new Error(
+          `deliverReply: ${segments.length - segmentsSent}/${segments.length} segment(s) failed to send after retries`,
+        ),
+        "reply",
+        hashUserId(userId),
+      );
     }
 
     trackEvent(
       "reply.sent",
       {
         userIdHash: hashUserId(userId),
-        sentAsFile: textBytes > TEXT_BYTE_LIMIT,
-        bytes: textBytes,
+        segments: segments.length,
+        segmentsSent,
+        chars: text.length,
         durationMs: Date.now() - startedAt,
       },
       hashUserId(userId),
@@ -664,16 +752,15 @@ export class WeChatAcpBridge {
     userId: string,
     contextToken: string,
     text: string,
-    startedAt: number,
   ): Promise<boolean> {
-    const ts = new Date().toISOString().replace(/[:.]/g, "-");
-    const fileName = `reply-${ts}.md`;
+    const fileName = "reply.md";
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wechat-acp-file-"));
     const filePath = path.join(tmpDir, fileName);
 
     try {
       fs.writeFileSync(filePath, text, "utf-8");
       const buffer = fs.readFileSync(filePath);
+      this.log(`[file] uploading ${fileName} (${buffer.length}B)`);
 
       for (let attempt = 1; attempt <= SEGMENT_SEND_MAX_ATTEMPTS; attempt++) {
         try {
@@ -689,9 +776,10 @@ export class WeChatAcpBridge {
               cdnBaseUrl: this.config.wechat.cdnBaseUrl,
             },
           );
+          this.log(`[file] sent successfully`);
           return true;
         } catch (err) {
-          this.log(`File send attempt ${attempt} failed: ${String(err)}`);
+          this.log(`[file] attempt ${attempt} failed: ${String(err)}`);
           trackException(err, "reply.file", hashUserId(userId));
           if (attempt < SEGMENT_SEND_MAX_ATTEMPTS) {
             await new Promise((r) => setTimeout(r, SEGMENT_SEND_RETRY_BASE_MS * attempt));

@@ -154,6 +154,7 @@ export interface GetUploadUrlReq {
 
 export interface GetUploadUrlResp {
   upload_param?: string;
+  upload_full_url?: string;
   thumb_upload_param?: string;
 }
 

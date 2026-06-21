@@ -13,6 +13,10 @@ export interface WeixinSendOpts {
   contextToken?: string;
 }
 
+function aesEcbPaddedSize(rawsize: number): number {
+  return Math.ceil(rawsize / 16) * 16;
+}
+
 export async function sendTextMessage(
   to: string,
   text: string,
@@ -24,9 +28,6 @@ export async function sendTextMessage(
     throw new Error("contextToken is required to send a message");
   }
 
-  // Generate a stable idempotency key for this logical send. Callers that
-  // retry should pass the same clientId so the iLink gateway de-duplicates
-  // repeated deliveries of the same message segment.
   const id = clientId ?? `wechat-acp-${crypto.randomUUID()}`;
   await sendFn({
     baseUrl: opts.baseUrl,
@@ -53,31 +54,39 @@ export async function sendFileMessage(
   opts: WeixinSendOpts & { cdnBaseUrl: string },
   clientId?: string,
 ): Promise<string> {
-  const aesKey = crypto.randomBytes(16);
-  const filekey = `${Date.now()}-${fileName}`;
-  const md5 = crypto.createHash("md5").update(buffer).digest("hex");
+  const rawsize = buffer.length;
+  const rawfilemd5 = crypto.createHash("md5").update(buffer).digest("hex");
+  const filesize = aesEcbPaddedSize(rawsize);
+  const filekey = crypto.randomBytes(16).toString("hex");
+  const aeskey = crypto.randomBytes(16);
+  const aeskeyHex = aeskey.toString("hex");
 
-  const uploadResp = await getUploadUrl({
+  const uploadUrlResp = await getUploadUrl({
     baseUrl: opts.baseUrl,
     token: opts.token,
     body: {
       filekey,
       media_type: UploadMediaType.FILE,
       to_user_id: to,
-      rawsize: buffer.length,
-      filesize: buffer.length,
-      rawfilemd5: md5,
+      rawsize,
+      rawfilemd5,
+      filesize,
+      no_need_thumb: true,
+      aeskey: aeskeyHex,
     },
   });
 
-  if (!uploadResp.upload_param) {
-    throw new Error("getUploadUrl returned no upload_param");
+  const uploadFullUrl = uploadUrlResp.upload_full_url?.trim();
+  const uploadParam = uploadUrlResp.upload_param;
+  if (!uploadFullUrl && !uploadParam) {
+    throw new Error("getUploadUrl returned no upload URL");
   }
 
-  const downloadParam = await uploadToCdn({
+  const { downloadParam } = await uploadToCdn({
     buffer,
-    uploadParam: uploadResp.upload_param,
-    aesKey,
+    uploadFullUrl: uploadFullUrl || undefined,
+    uploadParam: uploadParam ?? undefined,
+    aesKey: aeskey,
     filekey,
     cdnBaseUrl: opts.cdnBaseUrl,
   });
@@ -98,9 +107,11 @@ export async function sendFileMessage(
           type: MessageItemType.FILE,
           file_item: {
             file_name: fileName,
+            len: String(rawsize),
             media: {
               encrypt_query_param: downloadParam,
-              aes_key: aesKey.toString("base64"),
+              aes_key: Buffer.from(aeskeyHex).toString("base64"),
+              encrypt_type: 1,
             },
           },
         }],
@@ -111,23 +122,34 @@ export async function sendFileMessage(
 }
 
 /**
- * Split text into segments of max length, respecting line breaks where possible.
+ * Split text into segments whose UTF-8 byte length ≤ maxLen.
  */
 export function splitText(text: string, maxLen: number): string[] {
-  if (text.length <= maxLen) return [text];
+  if (Buffer.byteLength(text, "utf-8") <= maxLen) return [text];
 
   const segments: string[] = [];
   let remaining = text;
 
   while (remaining.length > 0) {
-    if (remaining.length <= maxLen) {
+    if (Buffer.byteLength(remaining, "utf-8") <= maxLen) {
       segments.push(remaining);
       break;
     }
 
-    // Try to break at a newline
-    let breakAt = remaining.lastIndexOf("\n", maxLen);
-    if (breakAt <= 0) breakAt = maxLen;
+    let breakAt = remaining.lastIndexOf("\n");
+    if (breakAt <= 0 || Buffer.byteLength(remaining.substring(0, breakAt), "utf-8") > maxLen) {
+      let lo = 0;
+      let hi = remaining.length;
+      while (lo < hi) {
+        const mid = Math.floor((lo + hi + 1) / 2);
+        if (Buffer.byteLength(remaining.substring(0, mid), "utf-8") <= maxLen) {
+          lo = mid;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      breakAt = lo || 1;
+    }
 
     segments.push(remaining.substring(0, breakAt));
     remaining = remaining.substring(breakAt).replace(/^\n/, "");
