@@ -3,8 +3,9 @@
  */
 
 import crypto from "node:crypto";
-import { sendMessage } from "./api.js";
-import { MessageType, MessageState } from "./types.js";
+import { sendMessage, getUploadUrl } from "./api.js";
+import { uploadToCdn } from "./media.js";
+import { MessageType, MessageState, MessageItemType, UploadMediaType } from "./types.js";
 
 export interface WeixinSendOpts {
   baseUrl: string;
@@ -39,6 +40,70 @@ export async function sendTextMessage(
         message_state: MessageState.FINISH,
         context_token: opts.contextToken,
         item_list: [{ type: 1, text_item: { text } }],
+      },
+    },
+  });
+  return id;
+}
+
+export async function sendFileMessage(
+  to: string,
+  buffer: Buffer,
+  fileName: string,
+  opts: WeixinSendOpts & { cdnBaseUrl: string },
+  clientId?: string,
+): Promise<string> {
+  const aesKey = crypto.randomBytes(16);
+  const filekey = `${Date.now()}-${fileName}`;
+  const md5 = crypto.createHash("md5").update(buffer).digest("hex");
+
+  const uploadResp = await getUploadUrl({
+    baseUrl: opts.baseUrl,
+    token: opts.token,
+    body: {
+      filekey,
+      media_type: UploadMediaType.FILE,
+      to_user_id: to,
+      rawsize: buffer.length,
+      filesize: buffer.length,
+      rawfilemd5: md5,
+    },
+  });
+
+  if (!uploadResp.upload_param) {
+    throw new Error("getUploadUrl returned no upload_param");
+  }
+
+  const downloadParam = await uploadToCdn({
+    buffer,
+    uploadParam: uploadResp.upload_param,
+    aesKey,
+    filekey,
+    cdnBaseUrl: opts.cdnBaseUrl,
+  });
+
+  const id = clientId ?? `wechat-acp-${crypto.randomUUID()}`;
+  await sendMessage({
+    baseUrl: opts.baseUrl,
+    token: opts.token,
+    body: {
+      msg: {
+        from_user_id: "",
+        to_user_id: to,
+        client_id: id,
+        message_type: MessageType.BOT,
+        message_state: MessageState.FINISH,
+        context_token: opts.contextToken,
+        item_list: [{
+          type: MessageItemType.FILE,
+          file_item: {
+            file_name: fileName,
+            media: {
+              encrypt_query_param: downloadParam,
+              aes_key: aesKey.toString("base64"),
+            },
+          },
+        }],
       },
     },
   });
