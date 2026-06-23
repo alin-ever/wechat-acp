@@ -501,6 +501,20 @@ async function main(): Promise<void> {
 
   // Handle daemon mode
   if (args.daemon && !process.env.WECHAT_ACP_DAEMON) {
+    const pidFile = config.daemon.pidFile;
+    if (fs.existsSync(pidFile)) {
+      const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+      if (pid && !Number.isNaN(pid)) {
+        try {
+          process.kill(pid, 0);
+          console.log(`Already running (PID ${pid}), skipping.`);
+          console.log(`Use "npx @alintever/wechat-acp stop --instance ${args.instance ?? "default"}" to stop.`);
+          process.exit(0);
+        } catch {
+          fs.unlinkSync(pidFile);
+        }
+      }
+    }
     daemonize(config);
     return;
   }
