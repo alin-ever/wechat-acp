@@ -66,7 +66,7 @@ export interface SessionManagerOpts {
   log: (msg: string) => void;
   onReply: (userId: string, contextToken: string, text: string) => Promise<void>;
   sendTyping: (userId: string, contextToken: string) => Promise<void>;
-  onMediaFile: (userId: string, contextToken: string, filePath: string, mimeType: string, fileName?: string) => Promise<void>;
+  onMediaFile?: (userId: string, contextToken: string, filePath: string, mimeType: string, fileName?: string) => Promise<void>;
 }
 
 export class SessionManager {
@@ -226,8 +226,12 @@ export class SessionManager {
       sendTyping: () => this.opts.sendTyping(userId, contextToken),
       onThoughtFlush: (text) => this.opts.onReply(userId, contextToken, text),
       onMessageFlush: (text) => this.opts.onReply(userId, contextToken, text),
-      onMediaFile: (filePath, mimeType, fileName) =>
-        this.opts.onMediaFile(userId, contextToken, filePath, mimeType, fileName),
+onMediaFile: (filePath, mimeType, fileName) => {
+            if (this.opts.onMediaFile) {
+              return this.opts.onMediaFile(userId, contextToken, filePath, mimeType, fileName);
+            }
+            return Promise.resolve();
+          },
       onConfigOptionsUpdate: (configOptions) => {
         const session = this.sessions.get(userId);
         if (!session || session.client !== client) return;
@@ -292,8 +296,12 @@ export class SessionManager {
           sendTyping: () => this.opts.sendTyping(session.userId, pending.contextToken),
           onThoughtFlush: (text) => this.opts.onReply(session.userId, pending.contextToken, text),
           onMessageFlush: (text) => this.opts.onReply(session.userId, pending.contextToken, text),
-          onMediaFile: (filePath, mimeType, fileName) =>
-            this.opts.onMediaFile(session.userId, pending.contextToken, filePath, mimeType, fileName),
+onMediaFile: (filePath, mimeType, fileName) => {
+              if (this.opts.onMediaFile) {
+                return this.opts.onMediaFile(session.userId, pending.contextToken, filePath, mimeType, fileName);
+              }
+              return Promise.resolve();
+            },
         });
 
         // Reset chunks for the new turn

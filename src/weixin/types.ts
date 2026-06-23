@@ -167,3 +167,21 @@ export interface SendTypingReq {
 export interface GetConfigResp {
   typing_ticket?: string;
 }
+
+export interface NotifyStopReq {
+  base_info?: BaseInfo;
+}
+
+export interface NotifyStopResp {
+  ret?: number;
+  errmsg?: string;
+}
+
+export interface NotifyStartReq {
+  base_info?: BaseInfo;
+}
+
+export interface NotifyStartResp {
+  ret?: number;
+  errmsg?: string;
+}

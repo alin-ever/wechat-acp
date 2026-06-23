@@ -56,14 +56,14 @@ export class WeChatAcpClient implements acp.Client {
     sendTyping: () => Promise<void>;
     onThoughtFlush: (text: string) => Promise<void>;
     onMessageFlush: (text: string) => Promise<void>;
-    onMediaFile: (filePath: string, mimeType: string, fileName?: string) => Promise<void>;
+onMediaFile?: (filePath: string, mimeType: string, fileName?: string) => Promise<void>;
   }): void {
     this.opts = {
       ...this.opts,
       sendTyping: callbacks.sendTyping,
       onThoughtFlush: callbacks.onThoughtFlush,
       onMessageFlush: callbacks.onMessageFlush,
-      onMediaFile: callbacks.onMediaFile,
+      ...(callbacks.onMediaFile ? { onMediaFile: callbacks.onMediaFile } : {}),
     };
   }
 
@@ -107,10 +107,12 @@ export class WeChatAcpClient implements acp.Client {
             ext,
           );
           this.opts.log(`[media] image (${imageContent.data.length} b64 chars) saved to ${filePath}`);
-          await this.sendWithRetry(
-            () => this.opts.onMediaFile(filePath, imageContent.mimeType),
-            "media-image",
-          );
+          if (this.opts.onMediaFile) {
+            await this.sendWithRetry(
+              () => this.opts.onMediaFile!(filePath, imageContent.mimeType),
+              "media-image",
+            );
+          }
         } else if (update.content.type === "resource_link") {
           await this.maybeFlushMessage();
           const link = update.content as acp.ResourceLink;
