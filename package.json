@@ -1,16 +1,17 @@
 {
   "name": "@alintever/wechat-acp",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "author": "alin-ever <1987873736@qq.com>",
   "description": "Bridge WeChat to any ACP-compatible AI agent",
   "type": "module",
   "files": [
     "dist/",
+    "!dist/package.json",
     "README.md",
     "package.json"
   ],
   "bin": {
-    "wechat-acp": "./dist/bin/wechat-acp.js"
+    "wechat-acp": "dist/bin/wechat-acp.js"
   },
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
