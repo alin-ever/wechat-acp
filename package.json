@@ -1,5 +1,5 @@
 {
-  "name": "wechat-acp",
+  "name": "@alin-ever/wechat-acp",
   "version": "0.9.0",
   "author": "alin-ever <1987873736@qq.com>",
   "description": "Bridge WeChat to any ACP-compatible AI agent",
