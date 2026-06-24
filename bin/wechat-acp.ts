@@ -8,7 +8,9 @@
  *   wechat-acp --agent "gemini" --cwd /path/to/project
  *   wechat-acp --agent "npx tsx ./agent.ts" --login
  *   wechat-acp --agent "claude code" --daemon
+ *   wechat-acp list
  *   wechat-acp stop
+ *   wechat-acp restart
  *   wechat-acp status
  *   wechat-acp inject --text "今日 AI 资讯"
  */
@@ -37,6 +39,16 @@ import {
 } from "../src/telemetry/index.js";
 import packageJson from "../package.json" with { type: "json" };
 
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h`;
+}
+
 function usage(): void {
   const presets = listBuiltInAgents()
     .map(({ id }) => id)
@@ -48,8 +60,10 @@ wechat-acp v${packageJson.version} — Bridge WeChat to any ACP-compatible AI ag
 Usage:
   wechat-acp --agent <preset|command>  [options]
   wechat-acp agents                        List built-in agent presets
+  wechat-acp list                          List all running daemon instances
   wechat-acp inject --text <text>          Inject a local message into the daemon
   wechat-acp stop                          Stop a running daemon
+  wechat-acp restart                       Restart a running daemon
   wechat-acp status                        Check daemon status
 
 Options:
@@ -290,7 +304,212 @@ function handleStatus(config: WeChatAcpConfig): void {
   }
 }
 
-function daemonize(config: WeChatAcpConfig): void {
+function handleList(config: WeChatAcpConfig): void {
+  const instances: Array<{
+    name: string;
+    pid: number;
+    pidFile: string;
+    argsFile: string;
+    agentLabel: string;
+  }> = [];
+
+  const baseDir = config.storage.instance
+    ? defaultStorageDir(config.storage.instance)
+    : defaultStorageDir();
+  const parentDir = path.dirname(baseDir);
+
+  // Default instance
+  const defaultPidFile = path.join(defaultStorageDir(), "daemon.pid");
+  if (fs.existsSync(defaultPidFile)) {
+    const pid = readPidSafely(defaultPidFile);
+    if (pid !== null) {
+      const isAlive = processExists(pid);
+      instances.push({
+        name: isAlive ? "default" : "default (stale)",
+        pid,
+        pidFile: defaultPidFile,
+        argsFile: path.join(defaultStorageDir(), "daemon.args"),
+        agentLabel: readAgentLabel(path.join(defaultStorageDir(), "daemon.args")),
+      });
+    }
+  }
+
+  // Named instances
+  const instancesDir = path.join(parentDir, "instances");
+  if (fs.existsSync(instancesDir)) {
+    for (const entry of fs.readdirSync(instancesDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const name = entry.name;
+      const pidFile = path.join(instancesDir, name, "daemon.pid");
+      if (!fs.existsSync(pidFile)) continue;
+
+      const pid = readPidSafely(pidFile);
+      if (pid === null) continue;
+
+      const isAlive = processExists(pid);
+      instances.push({
+        name: isAlive ? name : `${name} (stale)`,
+        pid,
+        pidFile,
+        argsFile: path.join(instancesDir, name, "daemon.args"),
+        agentLabel: readAgentLabel(path.join(instancesDir, name, "daemon.args")),
+      });
+    }
+  }
+
+  if (instances.length === 0) {
+    console.log("No instances found.");
+    return;
+  }
+
+  const isDaemonMode = process.env.WECHAT_ACP_DAEMON === "1";
+  if (isDaemonMode) {
+    console.log("⚠️  list is not available inside the daemon process.");
+    console.log("Run wechat-acp list directly (not via the daemon).");
+    return;
+  }
+
+  for (const inst of instances) {
+    const alive = !inst.name.includes("(stale)");
+    const status = alive ? "\x1b[32mRunning\x1b[0m" : "\x1b[31mDead\x1b[0m";
+    let line = `${inst.name.padEnd(16)} ${status} (PID ${inst.pid})`;
+    if (inst.agentLabel) line += `  agent: ${inst.agentLabel}`;
+    console.log(line);
+  }
+}
+
+function readPidSafely(pidFile: string): number | null {
+  try {
+    const raw = fs.readFileSync(pidFile, "utf-8").trim();
+    const pid = parseInt(raw, 10);
+    if (!pid || !Number.isFinite(pid)) return null;
+    return pid;
+  } catch {
+    return null;
+  }
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readAgentLabel(argsFile: string): string {
+  try {
+    const raw = fs.readFileSync(argsFile, "utf-8");
+    const saved = JSON.parse(raw);
+    if (saved.agent) return saved.agent;
+    // Try to extract from argv
+    const argv = saved.argv ?? [];
+    const idx = argv.findIndex((a: string) => a === "--agent");
+    if (idx !== -1 && idx + 1 < argv.length) return argv[idx + 1];
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+async function handleRestart(
+  config: WeChatAcpConfig,
+  args: ReturnType<typeof parseArgs>,
+): Promise<void> {
+  const pidFile = config.daemon.pidFile;
+  const argsFile = path.join(path.dirname(pidFile), "daemon.args");
+
+  if (!fs.existsSync(pidFile)) {
+    console.log("No daemon running (no PID file found).");
+    console.log('Use "wechat-acp --agent <preset> --daemon" to start one.');
+    return;
+  }
+
+  // Read the saved args to rebuild the command line
+  let savedAgent: string | null = null;
+  let savedArgs: string[] = [];
+  let savedCwd: string | undefined;
+  let savedConfigFile: string | undefined;
+  let savedInstance: string | undefined;
+  try {
+    if (fs.existsSync(argsFile)) {
+      const raw = fs.readFileSync(argsFile, "utf-8");
+      const saved = JSON.parse(raw);
+      savedAgent = saved.agent ?? null;
+      savedArgs = saved.argv ?? [];
+      if (savedArgs.length > 0) {
+        const sp = parseArgs(savedArgs);
+        savedCwd = sp.cwd;
+        savedConfigFile = sp.configFile;
+        savedInstance = sp.instance;
+      }
+    }
+  } catch {
+    // fallback: try to use the CLI --agent argument
+  }
+
+  // Stop first
+  const pid = readPidSafely(pidFile);
+  if (pid !== null && processExists(pid)) {
+    console.log(`Stopping daemon (PID ${pid})...`);
+    process.kill(pid, "SIGTERM");
+
+    // Wait for process to exit
+    const deadline = Date.now() + 10_000;
+    while (processExists(pid) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    if (processExists(pid)) {
+      console.error("Daemon did not exit within 10 seconds, force killing...");
+      process.kill(pid, "SIGKILL");
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    console.log(`Stopped daemon (PID ${pid})`);
+  } else {
+    console.log("Daemon not running (stale PID), cleaned up.");
+  }
+
+  // Clean up PID file
+  try { fs.unlinkSync(pidFile); } catch { /* ok */ }
+
+  const agentSelection = args.agent ?? savedAgent ?? config.agent.preset;
+  if (!agentSelection) {
+    console.error("Error: could not determine agent from saved state. Provide --agent explicitly.");
+    process.exit(1);
+  }
+
+  console.log(`Restarting with agent: ${agentSelection}...`);
+
+  // Build restart args
+  const restartArgs = [
+    "--agent", agentSelection,
+    "--daemon",
+  ];
+  const cwd = args.cwd ?? savedCwd;
+  if (cwd) restartArgs.push("--cwd", cwd);
+  const cfgFile = args.configFile ?? savedConfigFile;
+  if (cfgFile) restartArgs.push("--config", cfgFile);
+  const inst = args.instance ?? savedInstance;
+  if (inst) restartArgs.push("--instance", inst);
+
+  daemonize(config, {
+    agent: agentSelection,
+    argv: restartArgs,
+  });
+
+  // Small delay so daemon's PID file is written before we return
+  await new Promise((r) => setTimeout(r, 500));
+  const newPid = readPidSafely(pidFile);
+  if (newPid) {
+    console.log(`Restarted (PID ${newPid})`);
+  }
+}
+  function daemonize(
+  config: WeChatAcpConfig,
+  meta?: { agent?: string; argv?: string[] },
+): void {
   const logFile = config.daemon.logFile;
   const pidFile = config.daemon.pidFile;
 
@@ -299,6 +518,12 @@ function daemonize(config: WeChatAcpConfig): void {
 
   const out = fs.openSync(logFile, "a");
   const err = fs.openSync(logFile, "a");
+
+  // Store metadata for future restarts
+  if (meta) {
+    const argsFile = path.join(path.dirname(pidFile), "daemon.args");
+    fs.writeFileSync(argsFile, JSON.stringify(meta, null, 2), "utf-8");
+  }
 
   // Re-run ourselves as a detached child process.
   // Preserve the original node flags (e.g. --import tsx/esm) so that
@@ -465,6 +690,14 @@ async function main(): Promise<void> {
     handleStatus(config);
     return;
   }
+  if (args.command === "list") {
+    handleList(config);
+    return;
+  }
+  if (args.command === "restart") {
+    await handleRestart(config, args);
+    return;
+  }
 
   const agentSelection = args.agent ?? config.agent.preset;
 
@@ -515,7 +748,10 @@ async function main(): Promise<void> {
         }
       }
     }
-    daemonize(config);
+    daemonize(config, {
+      agent: agentSelection,
+      argv: process.argv.slice(2).filter((a) => a !== "--daemon"),
+    });
     return;
   }
 

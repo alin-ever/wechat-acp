@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.3
+
+- Add `wechat-acp list` subcommand — scans `~/.wechat-acp/` and `~/.wechat-acp/instances/*/` for `daemon.pid` files and displays running/stale instances with PID and agent label.
+- Add `wechat-acp restart` subcommand — stops the running daemon (waits for graceful shutdown with SIGTERM, falls back to SIGKILL after 10s) then re-launches with the same agent and options (preserved in a `daemon.args` sidecar file).
+- `--daemon` now writes a `daemon.args` metadata file alongside `daemon.pid` so `list` can show agent labels and `restart` can recover the original command line.
+
 ## 0.8.0
 
 - Hide ACP file diffs by default. Use `--show-diffs` or `agent.showDiffs: true` to forward diffs to WeChat.
