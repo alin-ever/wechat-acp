@@ -528,10 +528,16 @@ async function handleRestart(
   // Re-run ourselves as a detached child process.
   // Preserve the original node flags (e.g. --import tsx/esm) so that
   // TypeScript ESM imports continue to resolve in the child.
-  const childArgs = [
-    ...process.execArgv,
-    ...process.argv.slice(1).filter((a) => a !== "--daemon"),
-  ];
+  const childArgs = meta && meta.argv
+    ? [
+        ...process.execArgv,
+        process.argv[1],
+        ...meta.argv.filter((a) => a !== "--daemon"),
+      ]
+    : [
+        ...process.execArgv,
+        ...process.argv.slice(1).filter((a) => a !== "--daemon"),
+      ];
   const child = spawn(process.execPath, childArgs, {
     detached: true,
     stdio: ["ignore", out, err],

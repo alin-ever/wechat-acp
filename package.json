@@ -1,6 +1,6 @@
 {
   "name": "@alintever/wechat-acp",
-  "version": "0.9.4",
+  "version": "0.9.6",
   "author": "alin-ever <1987873736@qq.com>",
   "description": "Bridge WeChat to any ACP-compatible AI agent",
   "type": "module",
